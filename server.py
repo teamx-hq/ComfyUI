@@ -521,9 +521,95 @@ class PromptServer():
             }
             return web.json_response(system_stats)
 
-        @routes.get("/prompt")
-        async def get_prompt(request):
-            return web.json_response(self.get_queue_info())
+        @routes.post("/prompt")
+        async def post_prompt(request):
+            try:
+                json_data = await request.json()
+                logging.info(f"Received prompt: {json.dumps(json_data, indent=2)}")
+                
+                # Detailed logging of request information
+                logging.info(f"Request details:")
+                logging.info(f"  Method: {request.method}")
+                logging.info(f"  Path: {request.path}")
+                logging.info(f"  Headers: {dict(request.headers)}")
+                logging.info(f"  Query String: {request.query_string}")
+                logging.info(f"  Remote IP: {request.remote}")
+
+                json_data = self.trigger_on_prompt(json_data)
+
+                if "number" in json_data:
+                    number = float(json_data['number'])
+                else:
+                    number = self.number
+                    if "front" in json_data:
+                        if json_data['front']:
+                            number = -number
+
+                    self.number += 1
+
+                if "prompt" in json_data:
+                    prompt = json_data["prompt"]
+                    valid = execution.validate_prompt(prompt)
+                    extra_data = {}
+                    if "extra_data" in json_data:
+                        extra_data = json_data["extra_data"]
+
+                    if "client_id" in json_data:
+                        extra_data["client_id"] = json_data["client_id"]
+                    if valid[0]:
+                        prompt_id = str(uuid.uuid4())
+                        outputs_to_execute = valid[2]
+                        self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute))
+                        response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
+                        return web.json_response(response, dumps=lambda obj: json.dumps(obj, indent=2))
+                    else:
+                        logging.warning("invalid prompt: {}".format(valid[1]))
+                        return web.json_response(
+                            data={"error": valid[1], "node_errors": valid[3], "type": "invalid_prompt"},
+                            status=400,
+                            reason="Bad Request: Invalid Prompt",
+                            headers={"X-Error-Type": "InvalidPrompt"},
+                            content_type="application/json",
+                            dumps=lambda obj: json.dumps(obj, indent=2)
+                        )
+                else:
+                    return web.json_response(
+                        data={"error": "no prompt", "node_errors": [], "type": "missing_prompt"},
+                        status=400,
+                        reason="Bad Request: Missing Prompt",
+                        headers={"X-Error-Type": "MissingPrompt"},
+                        content_type="application/json",
+                        dumps=lambda obj: json.dumps(obj, indent=2)
+                    )
+
+            except json.JSONDecodeError as e:
+                error_msg = f"Invalid JSON: {str(e)}"
+                logging.error(f"JSON Decode Error: {error_msg}")
+                logging.error(f"Error details: {traceback.format_exc()}")
+                logging.error(f"Raw request body: {await request.text()}")
+                
+                return web.json_response(
+                    data={"error": error_msg, "type": "json_decode_error"},
+                    status=400,
+                    reason="Bad Request: Invalid JSON",
+                    headers={"X-Error-Type": "JSONDecodeError"},
+                    content_type="application/json",
+                    dumps=lambda obj: json.dumps(obj, indent=2)
+                )
+            
+            except Exception as e:
+                error_msg = f"Unexpected error: {str(e)}"
+                logging.error(f"Unexpected Error: {error_msg}")
+                logging.error(f"Error details: {traceback.format_exc()}")
+                
+                return web.json_response(
+                    data={"error": error_msg, "type": "unexpected_error"},
+                    status=500,
+                    reason="Internal Server Error",
+                    headers={"X-Error-Type": "UnexpectedError"},
+                    content_type="application/json",
+                    dumps=lambda obj: json.dumps(obj, indent=2)
+                )
 
         def node_info(node_class):
             obj_class = nodes.NODE_CLASS_MAPPINGS[node_class]
